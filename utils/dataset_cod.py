@@ -195,7 +195,11 @@ class CamObjDataset(data.Dataset):
         camo_desc_vec = tokenize(camo_desc, self.word_length, True).squeeze(0)
         attrs = torch.tensor(attrs)
 
-        return image, gt, fix, overall_desc_vec, camo_desc_vec, attrs
+        name = self.images[index].split('/')[-1]
+        # if name.endswith('.jpg'):
+        #     name = name.split('.jpg')[0] + '.png'
+
+        return image, gt, fix, overall_desc_vec, camo_desc_vec, attrs, name
 
     def filter_files(self):
         assert all(len(lst) == len(self.images) for lst in [self.gts, self.fix, self.overall_desc])

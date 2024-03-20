@@ -12,7 +12,8 @@ import matplotlib.pyplot as plt
 import logging
 from loguru import logger
 from multiprocessing import Manager
-from utils.dataset import tokenize
+from utils.dataset_cod import tokenize
+from tools import generate_prompt_from_file_name
 import utils.metrics as Measure
 from utils.misc import (AverageMeter, ProgressMeter, concat_all_gather, trainMetricGPU)
 
@@ -37,7 +38,7 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
     time.sleep(0.5)
     end = time.time()
 
-    for i, (img, img_gt, fix_gt, overall_desc, camo_desc, attr) in enumerate(train_loader):
+    for i, (img, img_gt, fix_gt, overall_desc, camo_desc, attr, name) in enumerate(train_loader):
         data_time.update(time.time() - end)
         # data
         img = img.cuda(non_blocking=True)
@@ -46,9 +47,13 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
         camo_desc = camo_desc.cuda(non_blocking=True)
         fix_gt = fix_gt.cuda(non_blocking=True)
         attr = attr.cuda(non_blocking=True)
+
+        # generate align_desc from file name
+        align_desc = generate_prompt_from_file_name(name)
+        align_desc = tokenize(align_desc).cuda(non_blocking=True)
         # forward
         with amp.autocast():
-            pred, fix_out, total_loss, fix_loss, kl_loss, cc_loss, mask_loss, consistency_loss, attr_loss = model(img, img_gt, overall_desc, camo_desc, attr, fix_gt)
+            pred, fix_out, total_loss, fix_loss, kl_loss, cc_loss, mask_loss, consistency_loss, attr_loss = model(img, img_gt, overall_desc, camo_desc, attr, fix_gt, align_desc)
 
         # backward
         optimizer.zero_grad()

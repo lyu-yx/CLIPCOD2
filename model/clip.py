@@ -335,12 +335,11 @@ class VisionTransformer(nn.Module):
         self.proj_1 = nn.Parameter(scale * torch.randn(width, output_dim))
         self.proj_2 = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor):                     # x: [2, 3, 352, 352]
+    def forward(self, x: torch.Tensor):                     
         x = self.conv1(x)  # shape = [*, width, grid, grid]      [2, 1024, 25, 25]
         x = x.reshape(x.shape[0], x.shape[1],-1)  # shape = [*, width, grid ** 2]       [2, 1024, 625]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]  [2, 625, 1024]
-        x = torch.cat([
-            self.class_embedding.to(x.dtype) + torch.zeros(
+        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(
                 x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]   
         x = x + self.positional_embedding.to(x.dtype)
         x = self.ln_pre(x)
@@ -357,12 +356,15 @@ class VisionTransformer(nn.Module):
         x0 = self.ln_post(x0[:, 1:, :])
         x1 = self.ln_post(x1[:, 1:, :])
         x2 = self.ln_post(x2[:, 1:, :])
+
+        visual_state = self.ln_post(x2[:, 0, :])
+
         # if self.proj_0 is not None:
         x0 = x0 @ self.proj_0
         x1 = x1 @ self.proj_1
         x2 = x2 @ self.proj_2
 
-        return (x0, x1, x2)
+        return (x0, x1, x2), visual_state
 
 
 class CLIP(nn.Module):

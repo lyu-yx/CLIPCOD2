@@ -95,6 +95,65 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
 
+
+
+class AttentionMutualFusion(nn.Module):
+    def __init__(self, input_dim=768, embed_dim=768):
+        super(AttentionMutualFusion, self).__init__()
+        self.attention_weights = nn.Sequential(
+            nn.Linear(input_dim, embed_dim),
+            nn.Tanh(),
+            nn.Linear(embed_dim, 1),
+            nn.Softmax(dim=1)
+        )
+
+    def forward(self, tensor1, tensor2):
+        # Compute attention weights
+        attn1 = self.attention_weights(tensor1.squeeze(1))
+        attn2 = self.attention_weights(tensor2.squeeze(1))
+        # Apply attention weights
+        fused_tensor = attn1 * tensor1 + attn2 * tensor2
+        return fused_tensor
+    
+
+class TextualRefinement(nn.Module):
+    def __init__(self, embed_dim, num_heads):
+        super(TextualRefinement, self).__init__()
+        self.camo_in_overalldesc = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads)
+        self.obj_in_camodesc = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads)
+
+        self.layer_norm1 = nn.LayerNorm(embed_dim)
+        self.layer_norm2 = nn.LayerNorm(embed_dim)
+
+        self.mutual_fusion = AttentionMutualFusion(input_dim=768, embed_dim=768)
+
+        self.obj_projector = nn.Linear(input_dim=768, embed_dim=768)
+        self.camo_projector = nn.Linear(input_dim=768, embed_dim=768)
+        
+    def forward(self, textual_dist):
+        camo_in_overalldesc_output, _ = self.camo_in_overalldesc(query=textual_dist['overall_s'], key=textual_dist['camo_w'], value=textual_dist['camo_w'])
+        obj_in_camodesc_output, _ = self.obj_in_camodesc(query=textual_dist['camo_s'], key=textual_dist['overall_w'], value=textual_dist['overall_w'])
+        
+
+        camo_in_overalldesc_output = self.layer_norm1(camo_in_overalldesc_output)
+        obj_in_camodesc_output = self.layer_norm2(obj_in_camodesc_output)
+
+        # camo_in_overalldesc_output = self.layer_norm1(camo_in_overalldesc_output + overall_desc)
+        # obj_in_camodesc_output = self.layer_norm2(obj_in_camodesc_output + camo_desc)
+        
+        obj_desc = obj_in_camodesc_output * textual_dist['overall_s']
+        camo_desc = camo_in_overalldesc_output * textual_dist['camo_s']
+
+        refined_desc = self.mutual_fusion(obj_desc, camo_desc)
+        
+        projected_obj = self.obj_projector(obj_desc)
+        projected_camo = self.camo_projector(camo_desc)
+        # textual_obj_loss = nn.MSELoss(projected_obj, textual_dist['align'])
+
+
+        return refined_desc, projected_obj, projected_camo
+
+
 class CrossAttentionFusion(nn.Module):
     def __init__(self, embed_dim, num_heads, num_features=3):
         super(CrossAttentionFusion, self).__init__()
@@ -146,7 +205,7 @@ class FixationEstimation(nn.Module):
         return out_fix, out_tensor
 
 
-class AttributePrediction(nn.Module):
+class WeightedAttributePrediction(nn.Module):
     def __init__(self, num_tokens, feature_dim, num_attr, deeper_layer_weight=0.5):
         super(AttributePrediction, self).__init__()
         self.deeper_layer_weight = deeper_layer_weight
@@ -187,25 +246,37 @@ class AttributePrediction(nn.Module):
         return attr_ctrb
 
 
+class AttributePrediction(nn.Module):
+    def __init__(self, num_tokens, feature_dim, num_attr):
+        super(AttributePrediction, self).__init__()
 
-# class FeatureTransform(nn.Module):
-#     def __init__(self, embed_dim, attr_dim):
-#         super(FeatureTransform, self).__init__()
-#         self.transform = nn.Linear(embed_dim, embed_dim)
-#         self.attr_transform = nn.Linear(attr_dim, embed_dim)
-#         self.gate = nn.Sequential(nn.Linear(embed_dim, embed_dim), nn.Sigmoid())
+        # Initial dimension reduction
+        self.init_reduce_dim = nn.Linear(feature_dim, 256)
 
-#     def forward(self, feature, image_attr):
-#         # Transform feature
-#         trans_feature = self.transform(feature)
+        # Further dimension reduction
+        self.reduce_dim = nn.Linear(num_tokens * 256 * 3, 512)
 
-#         # Transform image attribution and apply gating
-#         attr_feature = self.attr_transform(image_attr).unsqueeze(1)
-#         gate = self.gate(attr_feature)
+        # Fully connected layers
+        self.fc1 = nn.Linear(512, 256)
+        self.batch_norm1 = nn.BatchNorm1d(256)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(256, num_attr)
 
-#         # Apply gating with residual connection
-#         gated_feature = trans_feature * gate + feature
-#         return gated_feature
+    def forward(self, tensors):
+        
+        # Further reduce the dimensionality of the concatenated tensor
+        reduced = self.reduce_dim(tensors[2])
+
+        # Apply linear layers and other components
+        attr_ctrb = self.fc1(reduced)
+        attr_ctrb = self.batch_norm1(attr_ctrb)
+        attr_ctrb = self.relu(attr_ctrb)
+        attr_ctrb = self.dropout(attr_ctrb)
+        attr_ctrb = self.fc2(attr_ctrb)
+
+        return attr_ctrb
+
 
 
 class FeatureTransform(nn.Module):
