@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from model.clip import build_model
 from utils.losses import structure_loss, kl_div_loss, correlation_coefficient_loss, cosine_similarity_loss
 from .layers import (FPN, Projector, TransformerDecoder, FixationEstimation, FeatureFusionModule, 
-                     ProjectionNetwork, AttributePrediction, AttentionMutualFusion, TextualRefinement,
+                     ProjectionNetwork, AttributePrediction, TextualRefinement, SemanticHierarchicalEmbedding,
                      pool_visual_features, d3_to_d4)
 
 
@@ -40,7 +40,7 @@ class CLIPCOD(nn.Module):
 
         self.attr_pred = AttributePrediction(num_tokens=576, feature_dim=768, num_attr=cfg.num_attr)
         # visual modal fusion
-        self.visual_fusion = FeatureFusionModule(embed_dim=768, attr_dim=cfg.num_attr)
+        self.she = SemanticHierarchicalEmbedding(embed_dim=768, attr_dim=cfg.num_attr)
 
         # projector for consistency loss
         self.word_proj = ProjectionNetwork(input_dim=cfg.word_dim, proj_dim=cfg.projector_dim)
@@ -57,7 +57,7 @@ class CLIPCOD(nn.Module):
         self.proj = Projector(cfg.word_dim, cfg.vis_dim, 3, cfg.num_attr)
         self.texutal_dist = {}
          
-    def forward(self, img, img_gt, overall_desc=None, camo_desc=None, attr=None, fix_gt=None, align_desc=None):
+    def forward(self, img, img_gt, overall_desc=None, camo_desc=None, attr=None, fix_gt=None, component_desc=None):
         '''
             img: b, 3, h, w
             desc: b, worddim, words
@@ -75,7 +75,7 @@ class CLIPCOD(nn.Module):
             vis, visual_state = self.backbone.encode_image(img)           # list: 3 x [b, 576, 768] [n, 768]
             overall_words, overall_state = self.backbone.encode_text(overall_desc)   # [b, 77, 768] [b, 768]
             camo_words, camo_state = self.backbone.encode_text(camo_desc)   # [b, 77, 768] [b, 768]
-            _, align_desc = self.backbone.encode_text(align_desc)   #  [b, 768]
+            _, component_desc = self.backbone.encode_text(component_desc)   #  [b, 768]
             
             # generate texutal information dist
             textual_dist = self.texutal_dist
@@ -83,7 +83,7 @@ class CLIPCOD(nn.Module):
             textual_dist['overall_s'] = overall_state
             textual_dist['camo_w'] = camo_words
             textual_dist['camo_s'] = camo_state
-            textual_dist['align'] = align_desc
+            textual_dist['cpnts_s'] = component_desc
 
             refined_desc, projected_obj, projected_camo = self.textual_refine(textual_dist)
             # vis branch
@@ -92,12 +92,13 @@ class CLIPCOD(nn.Module):
 
             # fix prediction
             # fix_out, fix_tensor = self.fix_encoder(vis)  # [b, 1, 96, 96]  [b, 576, 768]
-            # vis_feats = self.visual_fusion(vis, fix_tensor, attr_out) # [b, 576, 768]
+            
+            vis_feats = self.she(attr_out, vis) # [b, 576, 768]
             
             
             # for consistency loss
-            vis_proj = pool_visual_features(vis_feats, pooling_type='max') # [b, 576, 768] -> [b, 768]
-            vis_proj = self.vis_proj(vis_proj) # [b, 768] -> [b, 512]
+            # vis_proj = pool_visual_features(vis_feats, pooling_type='max') # [b, 576, 768] -> [b, 768]
+            vis_proj = self.vis_proj(textual_dist['overall_s']) # [b, 768] -> [b, 512]
             word_proj = self.word_proj(refined_desc)   # [b, 768] -> [b, 512]
 
             # multimodal branch 
@@ -114,7 +115,7 @@ class CLIPCOD(nn.Module):
                 img_gt = F.interpolate(img_gt, pred.shape[-2:], mode='nearest').detach()
                 fix_gt = F.interpolate(fix_gt, fix_out.shape[-2:], mode='nearest').detach()
 
-            textual_obj_loss = nn.MSELoss(projected_obj, textual_dist['align'])
+            # textual_obj_loss = nn.MSELoss(projected_obj, textual_dist['cpnts_s']) # component loss
             textual_camo_loss = nn.MSELoss(projected_camo, attr)
 
 

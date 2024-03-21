@@ -1,4 +1,3 @@
-
 def generate_prompt_from_file_name(file_name):
     if file_name.startswith("camourflage"):
         prompt = "Complex scene with camouflaged object in it."
@@ -9,7 +8,7 @@ def generate_prompt_from_file_name(file_name):
     return prompt
 
 
-# write main function to test the above function
+# test
 def main():
     file_name = "camourflage_00265.jpg"
     prompt = generate_prompt_from_file_name(file_name)

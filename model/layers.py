@@ -128,7 +128,16 @@ class TextualRefinement(nn.Module):
         self.mutual_fusion = AttentionMutualFusion(input_dim=768, embed_dim=768)
 
         self.obj_projector = nn.Linear(input_dim=768, embed_dim=768)
-        self.camo_projector = nn.Linear(input_dim=768, embed_dim=768)
+        self.camo_projector = nn.Linear(input_dim=768, embed_dim=17)
+        # alternative none-learnable projector
+        # self.projector = nn.Sequential(
+        #     nn.Linear(768, 512),
+        #     nn.ReLU(),
+        #     nn.Linear(512, 256),
+        #     nn.ReLU(),
+        #     nn.Linear(256, 17)
+        # )
+        
         
     def forward(self, textual_dist):
         camo_in_overalldesc_output, _ = self.camo_in_overalldesc(query=textual_dist['overall_s'], key=textual_dist['camo_w'], value=textual_dist['camo_w'])
@@ -148,7 +157,7 @@ class TextualRefinement(nn.Module):
         
         projected_obj = self.obj_projector(obj_desc)
         projected_camo = self.camo_projector(camo_desc)
-        # textual_obj_loss = nn.MSELoss(projected_obj, textual_dist['align'])
+
 
 
         return refined_desc, projected_obj, projected_camo
@@ -278,63 +287,73 @@ class AttributePrediction(nn.Module):
         return attr_ctrb
 
 
+class CrossModalTransformerLayer(nn.Module):
+    def __init__(self, feature_dim, num_heads):
+        super(CrossModalTransformerLayer, self).__init__()
+        
+        self.self_attn_vision = nn.MultiheadAttention(embed_dim=feature_dim, num_heads=num_heads)
+        self.cross_attn = nn.MultiheadAttention(embed_dim=feature_dim, num_heads=num_heads)
 
-class FeatureTransform(nn.Module):
-    def __init__(self, embed_dim, attr_dim):
-        super(FeatureTransform, self).__init__()
-        self.transform = nn.Linear(embed_dim, embed_dim)
-        self.attr_transform = nn.Linear(attr_dim, embed_dim * 576)
-        self.squeeze = nn.AdaptiveAvgPool1d(1)  
-        self.excitation = nn.Sequential(
-            nn.Linear(576, 576 // 16),
-            nn.ReLU(),
-            nn.Linear(576 // 16, 576),
+    def forward(self, semantic_features, vision_features):
+    
+        semantic_features_expanded = semantic_features.unsqueeze(1)
+        vision_features = vision_features.permute(1, 0, 2)
+        vision_features_attended, _ = self.self_attn_vision(vision_features, vision_features, vision_features)
+        semantic_features_transformed, attn_update = self.cross_attn(vision_features_attended, semantic_features_expanded, semantic_features_expanded) # [b, sequence_length, feature_dim]
+        
+        return semantic_features_transformed, attn_update
+
+class SEBlock(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SEBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
             nn.Sigmoid()
         )
 
-    def forward(self, feature, image_attr):
-        # Transform feature
-        trans_feature = self.transform(feature)  # b, 576, 768
-        b, c, _ = trans_feature.size()
-        # Transform image attribution and apply gating
-        attr_feature = self.attr_transform(image_attr)  # b, 576 * 768
-        attr_feature = attr_feature.view(b, c, -1)  # b, 576, 768
+    def forward(self, x):
+        # Expecting x of shape [b, sequence_length, channel] for vision or [b, channel] for semantic features
+        original_shape = x.shape
+        
+        y = self.avg_pool(x).squeeze(-1)
+        y = self.fc(y).view(original_shape[0], original_shape[-1], -1)
+        return x * y.expand_as(x)
 
-        y = self.squeeze(attr_feature).view(b, c)  # b, 576
-        y = self.excitation(y).view(b, c, 1)  #  b, 576, 1
-        gated_feature = trans_feature * y.expand_as(trans_feature) + feature
+class SemanticHierarchicalEmbedding(nn.Module):
+    def __init__(self, feature_dim, num_heads):
+        super(SemanticHierarchicalEmbedding, self).__init__()
+        self.cross_attn_0  = CrossModalTransformerLayer(feature_dim, num_heads)
+        self.cross_attn_1 = CrossModalTransformerLayer(feature_dim, num_heads)
+        self.cross_attn_2 = CrossModalTransformerLayer(feature_dim, num_heads)
 
-        return gated_feature
+        self.se_semantic_shallow = SEBlock(feature_dim)
+        self.se_semantic_deep = SEBlock(feature_dim)
 
-class FeatureFusionModule(nn.Module):
-    def __init__(self, embed_dim, attr_dim):
-        super(FeatureFusionModule, self).__init__()
-        self.embed_dim = embed_dim
-        self.shallow_transform = FeatureTransform(embed_dim, attr_dim)
-        self.mid_transform = FeatureTransform(embed_dim, attr_dim)
-        self.deep_transform = FeatureTransform(embed_dim, attr_dim)
-        self.attention_gen = nn.Linear(embed_dim, 3)
+        self.layer_norm1 = nn.LayerNorm(feature_dim)
+        self.layer_norm2 = nn.LayerNorm(feature_dim)
 
-    def forward(self, feature_list, fixation_pred, image_attr):
-        # Apply transformations
-        gated_shallow = self.shallow_transform(feature_list[0], image_attr)
-        gated_mid = self.mid_transform(feature_list[1], image_attr)
-        gated_deep = self.deep_transform(feature_list[2], image_attr)
 
-        # Generate attention weights
-        attention_weights = F.softmax(self.attention_gen(fixation_pred), dim=-1)
+    def forward(self, semantic_features, vision_features, attn_update_w=[0.2, 0.3, 0.5]):
+        x_0, attn_update0 = self.cross_attn_0(semantic_features, vision_features[0])
+        
+        x_1, attn_update1 = self.cross_attn_1(semantic_features, vision_features[1])
+        x_1 = x_1 + x_0
+        x_1 = self.layer_norm1(x_1)
+        x_1 = self.se_semantic_shallow(x_1)
 
-        # Apply attention weights
-        weighted_shallow = gated_shallow * attention_weights[:,:,0].unsqueeze(-1) + gated_shallow
-        weighted_mid = gated_mid * attention_weights[:,:,1].unsqueeze(-1) + gated_mid
-        weighted_deep = gated_deep * attention_weights[:,:,2].unsqueeze(-1) +  gated_deep
+        x_2, attn_update2 = self.cross_attn_2(semantic_features, vision_features[1])
+        x_2 = x_2 + x_1
+        x_2 = self.layer_norm2(x_2)
+        x_2 = self.se_semantic_shallow(x_2)
 
-        # Aggregate features
-        aggregated_feature = (weighted_shallow + 2 * weighted_mid + 4 * weighted_deep) / 7
-        normalized_feature = F.layer_norm(aggregated_feature, [576, self.embed_dim])
-
-        return normalized_feature
-
+        attn = attn_update0 * attn_update_w[0] + attn_update1 * attn_update_w[1] + attn_update2 * attn_update_w[2]
+        
+        x_2 = x_2 + attn * vision_features[2]
+        
+        return x_2
 
 class ProjectionNetwork(nn.Module):
     def __init__(self, input_dim, proj_dim, hidden_dim=None):

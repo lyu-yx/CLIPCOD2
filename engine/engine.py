@@ -13,7 +13,7 @@ import logging
 from loguru import logger
 from multiprocessing import Manager
 from utils.dataset_cod import tokenize
-from tools import generate_prompt_from_file_name
+from tools.object_desc_align import generate_prompt_from_file_name
 import utils.metrics as Measure
 from utils.misc import (AverageMeter, ProgressMeter, concat_all_gather, trainMetricGPU)
 
@@ -49,11 +49,11 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
         attr = attr.cuda(non_blocking=True)
 
         # generate align_desc from file name
-        align_desc = generate_prompt_from_file_name(name)
-        align_desc = tokenize(align_desc).cuda(non_blocking=True)
+        component_desc = generate_prompt_from_file_name(name)
+        # component_desc = tokenize(component_desc).cuda(non_blocking=True)
         # forward
         with amp.autocast():
-            pred, fix_out, total_loss, fix_loss, kl_loss, cc_loss, mask_loss, consistency_loss, attr_loss = model(img, img_gt, overall_desc, camo_desc, attr, fix_gt, align_desc)
+            pred, fix_out, total_loss, fix_loss, kl_loss, cc_loss, mask_loss, consistency_loss, attr_loss = model(img, img_gt, overall_desc, camo_desc, attr, fix_gt, component_desc)
 
         # backward
         optimizer.zero_grad()
