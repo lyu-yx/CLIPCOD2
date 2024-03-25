@@ -53,8 +53,8 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
         # component_desc = tokenize(component_desc).cuda(non_blocking=True)
         # forward
         with amp.autocast():
-            pred, fix_out, total_loss, fix_loss, kl_loss, cc_loss, mask_loss, consistency_loss, attr_loss = model(img, img_gt, overall_desc, camo_desc, attr, fix_gt, component_desc)
-
+            # pred, fix_out, total_loss, fix_loss, kl_loss, cc_loss, mask_loss, consistency_loss, attr_loss = model(img, img_gt, overall_desc, camo_desc, attr, fix_gt, component_desc)
+            pred, total_loss, mask_loss, consistency_loss, attr_loss = model(img, img_gt, overall_desc, camo_desc, attr, fix_gt, component_desc)
         # backward
         optimizer.zero_grad()
         scaler.scale(total_loss).backward()
@@ -68,17 +68,17 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
         total_loss = total_loss / dist.get_world_size()
         total_loss_meter.update(total_loss.item(), img.size(0))
 
-        dist.all_reduce(fix_loss.detach())
-        fix_loss = fix_loss / dist.get_world_size()
-        fix_loss_meter.update(fix_loss.item(), img.size(0))
+        # dist.all_reduce(fix_loss.detach())
+        # fix_loss = fix_loss / dist.get_world_size()
+        # fix_loss_meter.update(fix_loss.item(), img.size(0))
 
-        dist.all_reduce(kl_loss.detach())
-        kl_loss = kl_loss / dist.get_world_size()
-        kl_loss_meter.update(kl_loss.item(), img.size(0))
+        # dist.all_reduce(kl_loss.detach())
+        # kl_loss = kl_loss / dist.get_world_size()
+        # kl_loss_meter.update(kl_loss.item(), img.size(0))
 
-        dist.all_reduce(cc_loss.detach())
-        cc_loss = cc_loss / dist.get_world_size()
-        cc_loss_meter.update(cc_loss.item(), img.size(0))
+        # dist.all_reduce(cc_loss.detach())
+        # cc_loss = cc_loss / dist.get_world_size()
+        # cc_loss_meter.update(cc_loss.item(), img.size(0))
 
         dist.all_reduce(mask_loss.detach())
         mask_loss = mask_loss / dist.get_world_size()

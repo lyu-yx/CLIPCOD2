@@ -4,11 +4,9 @@ import torch.nn.functional as F
 
 from model.clip import build_model
 from utils.losses import structure_loss, kl_div_loss, correlation_coefficient_loss, cosine_similarity_loss
-from .layers import (FPN, Projector, TransformerDecoder, FixationEstimation, FeatureFusionModule, 
+from .layers import (Projector, TransformerDecoder, FixationEstimation, FeatureFusionModule, 
                      ProjectionNetwork, AttributePrediction, TextualRefinement, SemanticHierarchicalEmbedding,
                      pool_visual_features, d3_to_d4)
-
-
 
 class CLIPCOD(nn.Module):
     def __init__(self, cfg):
@@ -46,7 +44,8 @@ class CLIPCOD(nn.Module):
         self.word_proj = ProjectionNetwork(input_dim=cfg.word_dim, proj_dim=cfg.projector_dim)
         self.vis_proj = ProjectionNetwork(input_dim=cfg.vis_dim, proj_dim=cfg.projector_dim)
 
-        # multimodal decoder
+    
+        # multimodal decoder    
         self.decoder = TransformerDecoder(num_layers=cfg.num_layers,
                                           d_model=cfg.vis_dim,
                                           nhead=cfg.num_head,
@@ -110,6 +109,12 @@ class CLIPCOD(nn.Module):
             
             pred = self.proj(multimodal_feats, attr_out, self.use_attr) # [b, c, 96, 96]
             
+            # crop original image with pred to divided into foreground and background
+
+
+
+
+
             # resize mask
             if pred.shape[-2:] != img_gt.shape[-2:]:
                 img_gt = F.interpolate(img_gt, pred.shape[-2:], mode='nearest').detach()
@@ -121,13 +126,17 @@ class CLIPCOD(nn.Module):
 
 
             mask_loss = structure_loss(pred, img_gt)
-            kl_loss = kl_div_loss(fix_out, fix_gt) * self.kl_weight
-            cc_loss = correlation_coefficient_loss(fix_out, fix_gt) * self.cc_weight
-            fix_loss = kl_loss + cc_loss
+            # kl_loss = kl_div_loss(fix_out, fix_gt) * self.kl_weight
+            # cc_loss = correlation_coefficient_loss(fix_out, fix_gt) * self.cc_weight
+            # fix_loss = kl_loss + cc_loss
+
+            component_loss = nn.MSELoss(projected_obj, component_desc)
+
             attr_loss = nn.MSELoss()(attr_out, attr)
             consistency_loss = cosine_similarity_loss(vis_proj, word_proj) * self.consistency_weight
-            total_loss = mask_loss + fix_loss + consistency_loss + attr_loss
-            return pred.detach(), fix_out.detach(), total_loss, fix_loss, kl_loss, cc_loss, mask_loss, consistency_loss, attr_loss
+            total_loss = mask_loss + consistency_loss + attr_loss
+            # return pred.detach(), fix_out.detach(), total_loss, fix_loss, kl_loss, cc_loss, mask_loss, consistency_loss, attr_loss
+            return pred.detach(), total_loss, mask_loss, consistency_loss, attr_loss
         else:
             # vis: list: 3 x [b, 576, 768]
             # word: b, 77, 1024
