@@ -1,5 +1,4 @@
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -122,9 +121,22 @@ class TextualRefinement(nn.Module):
         self.camo_in_overalldesc = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads)
         self.obj_in_camodesc = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads)
 
-        self.layer_norm1 = nn.LayerNorm(embed_dim)
-        self.layer_norm2 = nn.LayerNorm(embed_dim)
 
+        self.add_norm1 = nn.LayerNorm(embed_dim)
+        self.add_norm2 = nn.LayerNorm(embed_dim)
+
+        self.mlp1 = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim * 2, embed_dim),
+        )
+
+        self.mlp2 = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim),
+        )
+        
         self.mutual_fusion = AttentionMutualFusion(input_dim=768, embed_dim=768)
 
         self.obj_projector = nn.Linear(input_dim=768, embed_dim=768)
@@ -143,15 +155,26 @@ class TextualRefinement(nn.Module):
         camo_in_overalldesc_output, _ = self.camo_in_overalldesc(query=textual_dist['overall_s'], key=textual_dist['camo_w'], value=textual_dist['camo_w'])
         obj_in_camodesc_output, _ = self.obj_in_camodesc(query=textual_dist['camo_s'], key=textual_dist['overall_w'], value=textual_dist['overall_w'])
         
+        # add norm
+        camo_in_overalldesc_output = camo_in_overalldesc_output + textual_dist['overall_s']
+        obj_in_camodesc_output = obj_in_camodesc_output + textual_dist['camo_s']
 
-        camo_in_overalldesc_output = self.layer_norm1(camo_in_overalldesc_output)
-        obj_in_camodesc_output = self.layer_norm2(obj_in_camodesc_output)
+        camo_in_overalldesc_output = self.add_norm1(camo_in_overalldesc_output)
+        obj_in_camodesc_output = self.add_norm2(obj_in_camodesc_output)
 
         # camo_in_overalldesc_output = self.layer_norm1(camo_in_overalldesc_output + overall_desc)
         # obj_in_camodesc_output = self.layer_norm2(obj_in_camodesc_output + camo_desc)
         
         obj_desc = obj_in_camodesc_output * textual_dist['overall_s']
         camo_desc = camo_in_overalldesc_output * textual_dist['camo_s']
+
+        
+        obj_desc = torch.cat([obj_desc, textual_dist['overall_s']], dim=1)
+        camo_desc = torch.cat([camo_desc, textual_dist['camo_s']], dim=1)
+
+        obj_desc = self.mlp1(obj_desc)
+        camo_desc = self.mlp2(camo_desc)
+
 
         refined_desc = self.mutual_fusion(obj_desc, camo_desc)
         
@@ -161,6 +184,31 @@ class TextualRefinement(nn.Module):
 
 
         return refined_desc, projected_obj, projected_camo
+
+
+class ForegroundBackgroundAlignment(nn.Module):
+    def __init__(self, binary_mask_threshold=0.5):
+        super(ForegroundBackgroundAlignment, self).__init__()
+        self.binary_mask_threshold = binary_mask_threshold
+
+    def forward(self, predict_mask, img):
+        # Ensure predict_mask and img have a batch dimension
+        if predict_mask.dim() == 3:
+            predict_mask = predict_mask.unsqueeze(0)
+        if img.dim() == 3:
+            img = img.unsqueeze(0)
+            
+        # Upsample the mask to the same size as the image
+        predict_mask = F.interpolate(predict_mask, size=img.shape[-2:], mode='bilinear', align_corners=False)
+        
+        # Threshold the mask
+        predict_mask = (predict_mask > self.binary_mask_threshold).float()
+
+        # Generate the foreground and background images from the mask and original image
+        im_masked_fg = predict_mask * img
+        im_masked_bg = (1 - predict_mask) * img
+
+        return im_masked_fg, im_masked_bg
 
 
 class CrossAttentionFusion(nn.Module):
@@ -596,64 +644,3 @@ def d3_to_d4(self, t):
         h = w = int(math.sqrt(hw))
         return t.transpose(1, 2).reshape(n, c, h, w)
 
-class FPN(nn.Module):
-    def __init__(self,
-                 in_channels=[768, 768, 768],
-                 out_channels=[256, 512, 1024]):
-        super(FPN, self).__init__()
-        # text projection [b, 768] --> [b, 1024]
-        self.txt_proj = linear_layer(in_channels[2], out_channels[2]) # linear + batch norm + relu
-
-        # fusion 1: v5 & seq -> f_5: b, 1024, 24, 24
-        self.f1_v_proj = conv_layer(in_channels[2], out_channels[2], 1, 0)  # CBR
-        self.norm_layer = nn.Sequential(nn.BatchNorm2d(out_channels[2]),
-                                        nn.ReLU(True))
-        # fusion 2: v4 & fm -> f_4: b, 512, 24, 24
-        self.f2_v_proj = conv_layer(in_channels[1], out_channels[1], 3, 1)
-        self.f2_cat = conv_layer(out_channels[2] + out_channels[1],
-                                 out_channels[1], 1, 0)
-        # fusion 3: v3 & fm_mid -> f_3: b, 512, 24, 24
-        self.f3_v_proj = conv_layer(in_channels[0], out_channels[0], 3, 1)
-        self.f3_cat = conv_layer(out_channels[0] + out_channels[1],
-                                 out_channels[1], 1, 0)
-        # fusion 4: f_3 & f_4 & f_5 -> fq: b, 256, 24, 24
-        self.f4_proj5 = conv_layer(out_channels[2], out_channels[1], 3, 1)
-        self.f4_proj4 = conv_layer(out_channels[1], out_channels[1], 3, 1)
-        self.f4_proj3 = conv_layer(out_channels[1], out_channels[1], 3, 1)
-        # aggregation
-        self.aggr = conv_layer(3 * out_channels[1], out_channels[1], 1, 0)
-        self.coordconv = nn.Sequential(
-            CoordConv(out_channels[1], out_channels[1], 3, 1),
-            conv_layer(out_channels[1], out_channels[1], 3, 1))
-
-    def forward(self, imgs, state):
-        # imgs: 3 x [b, 576, 768] state: [b, 768]
-        v3, v4, v5 = imgs
-        v3 = d3_to_d4(self, v3) # [b, 768, 24, 24]
-        v4 = d3_to_d4(self, v4)
-        v5 = d3_to_d4(self, v5) 
-        # fusion 1: b, 768, 24, 24
-        # text projection: b, 768 -> b, 1024
-        # out: b, 1024, 24, 24
-        state = self.txt_proj(state).unsqueeze(-1).unsqueeze(-1)  # b, 1024, 1, 1
-        f5 = self.f1_v_proj(v5)
-        f5 = self.norm_layer(f5 * state)
-        # fusion 2: b, 768, 24, 24
-        # out: b, 512, 24, 24
-        f4 = self.f2_v_proj(v4)
-        f4 = self.f2_cat(torch.cat([f4, f5], dim=1))
-        # fusion 3: b, 768, 24, 24
-        # out: b, 256, 24, 24
-        f3 = self.f3_v_proj(v3)
-        f3 = self.f3_cat(torch.cat([f3, f4], dim=1))
-        # fusion 4: 3 * [b, 768, 24, 24]
-        fq5 = self.f4_proj5(f5)
-        fq4 = self.f4_proj4(f4)
-        fq3 = self.f4_proj3(f3)
-        # query
-        
-        fq = torch.cat([fq3, fq4, fq5], dim=1)
-        fq = self.aggr(fq)
-        fq = self.coordconv(fq)
-        # b, out_channels[1], 24, 24
-        return fq

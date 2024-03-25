@@ -59,6 +59,8 @@ TRAIN:
   kl_weight: 1
   consistency_weight: 0.2
 
+  forground_background_threshold: 0.5
+
   # Resume & Save
   weight:  # path to initial weight (default: none)
   resume:  # path to latest checkpoint (default: none)

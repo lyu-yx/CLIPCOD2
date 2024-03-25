@@ -81,4 +81,4 @@ def cosine_similarity_loss(text_features, visual_features):
     cosine_sim = torch.sum(text_features * visual_features, dim=1)
     
     # Since we want to maximize similarity, we minimize the negative similarity
-    return -cosine_sim.mean()
+    return 1-cosine_sim.mean()

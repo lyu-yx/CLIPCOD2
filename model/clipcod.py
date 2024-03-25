@@ -6,7 +6,7 @@ from model.clip import build_model
 from utils.losses import structure_loss, kl_div_loss, correlation_coefficient_loss, cosine_similarity_loss
 from .layers import (Projector, TransformerDecoder, FixationEstimation, FeatureFusionModule, 
                      ProjectionNetwork, AttributePrediction, TextualRefinement, SemanticHierarchicalEmbedding,
-                     pool_visual_features, d3_to_d4)
+                     ForegroundBackgroundAlignment, pool_visual_features, d3_to_d4)
 
 class CLIPCOD(nn.Module):
     def __init__(self, cfg):
@@ -55,6 +55,9 @@ class CLIPCOD(nn.Module):
         # Projector
         self.proj = Projector(cfg.word_dim, cfg.vis_dim, 3, cfg.num_attr)
         self.texutal_dist = {}
+
+        # foreground-background alignment
+        self.f_b_align = ForegroundBackgroundAlignment(cfg.forground_background_threshold)
          
     def forward(self, img, img_gt, overall_desc=None, camo_desc=None, attr=None, fix_gt=None, component_desc=None):
         '''
@@ -109,34 +112,45 @@ class CLIPCOD(nn.Module):
             
             pred = self.proj(multimodal_feats, attr_out, self.use_attr) # [b, c, 96, 96]
             
-            # crop original image with pred to divided into foreground and background
-
-
-
-
-
+            
             # resize mask
             if pred.shape[-2:] != img_gt.shape[-2:]:
                 img_gt = F.interpolate(img_gt, pred.shape[-2:], mode='nearest').detach()
-                fix_gt = F.interpolate(fix_gt, fix_out.shape[-2:], mode='nearest').detach()
+                # fix_gt = F.interpolate(fix_gt, fix_out.shape[-2:], mode='nearest').detach()
 
-            # textual_obj_loss = nn.MSELoss(projected_obj, textual_dist['cpnts_s']) # component loss
-            textual_camo_loss = nn.MSELoss(projected_camo, attr)
+            # foreground and background alignment using CLIP, get f_b_alignment_loss
+            foreground, background = self.f_b_align(pred, img)
+            _, foreground_s = self.backbone.encode_image(foreground)           # list: 3 x [b, 576, 768] [n, 768]
+            _, background_s = self.backbone.encode_image(background)           # list: 3 x [b, 576, 768] [n, 768]
 
 
+            # prevent multiple forward of foreground and background description
 
+            # foreground_desc = "Camouflaged object"
+            # background_desc = "Complex background"
+            # foreground_desc, _ = self.backbone.encode_text(foreground_desc)   # [b, 77, 768] [b, 768]
+            # background_desc, _ = self.backbone.encode_text(background_desc)   # [b, 77, 768] [b, 768]
+            loaded_tensors = torch.load('./pretrain/fore_background_desc.pt')
+            foreground_desc = loaded_tensors['foreground_desc']
+            background_desc = loaded_tensors['background_desc']
+            
+            # mask loss
             mask_loss = structure_loss(pred, img_gt)
-            # kl_loss = kl_div_loss(fix_out, fix_gt) * self.kl_weight
-            # cc_loss = correlation_coefficient_loss(fix_out, fix_gt) * self.cc_weight
-            # fix_loss = kl_loss + cc_loss
 
-            component_loss = nn.MSELoss(projected_obj, component_desc)
+            # Attribute related loss
+            textual_camo_loss = nn.MSELoss(projected_camo, attr)
+            attr_loss_pred = nn.MSELoss()(attr_out, attr)
+            attr_loss = textual_camo_loss + attr_loss_pred
 
-            attr_loss = nn.MSELoss()(attr_out, attr)
+            # multimodal consistency loss
+            f_b_alignment_loss = cosine_similarity_loss(foreground_s, foreground_desc) + cosine_similarity_loss(background_s, background_desc)
+            component_loss = cosine_similarity_loss(projected_obj, component_desc)
             consistency_loss = cosine_similarity_loss(vis_proj, word_proj) * self.consistency_weight
-            total_loss = mask_loss + consistency_loss + attr_loss
+            mm_loss = f_b_alignment_loss + component_loss + consistency_loss
+
+            total_loss = mask_loss + attr_loss + mm_loss
             # return pred.detach(), fix_out.detach(), total_loss, fix_loss, kl_loss, cc_loss, mask_loss, consistency_loss, attr_loss
-            return pred.detach(), total_loss, mask_loss, consistency_loss, attr_loss
+            return pred.detach(), total_loss, mask_loss, attr_loss, mm_loss, textual_camo_loss, attr_loss_pred, f_b_alignment_loss, component_loss, consistency_loss
         else:
             # vis: list: 3 x [b, 576, 768]
             # word: b, 77, 1024
@@ -148,7 +162,7 @@ class CLIPCOD(nn.Module):
             attr_out = self.attr_pred(vis)
             # fix prediction
             fix_out, fix_tensor = self.fix_encoder(vis)  # [b, 1, 96, 96]  [b, 576, 768]
-            vis_feats = self.visual_fusion(vis, fix_tensor, attr_out) # [b, 576, 768]
+            vis_feats = self.f_b_align(vis, fix_tensor, attr_out) # [b, 576, 768]
 
             # multimodal branch 
             multimodal_feats = d3_to_d4(self, vis_feats)

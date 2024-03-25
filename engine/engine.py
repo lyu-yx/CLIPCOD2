@@ -23,15 +23,20 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
     data_time = AverageMeter('Data', ':2.2f')
     lr = AverageMeter('Lr', ':1.6f')
     total_loss_meter = AverageMeter('Loss', ':2.4f')
-    fix_loss_meter = AverageMeter('Fix Loss', ':2.4f')
-    kl_loss_meter = AverageMeter('KL Loss', ':2.4f')
-    cc_loss_meter = AverageMeter('CC Loss', ':2.4f')
     mask_loss_meter = AverageMeter('mask Loss', ':2.4f')
-    consistency_loss_meter = AverageMeter('Consistency Loss', ':2.4f')
     attr_loss_meter = AverageMeter('Attr Loss', ':2.4f')
+    mm_loss_meter = AverageMeter('MM Loss', ':2.4f')
+    textual_camo_loss_meter = AverageMeter('Textual Camo Loss', ':2.4f')
+    attr_loss_pred_meter = AverageMeter('Attr Loss Pred', ':2.4f')
+    f_b_alignment_loss_meter = AverageMeter('F_B Alignment Loss', ':2.4f')
+    component_loss_meter = AverageMeter('Component Loss', ':2.4f')
+    consistency_loss_meter = AverageMeter('Consistency Loss', ':2.4f')
+
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, lr, total_loss_meter, mask_loss_meter, fix_loss_meter, kl_loss_meter, cc_loss_meter, consistency_loss_meter, attr_loss_meter],
+        [batch_time, data_time, lr, total_loss_meter, mask_loss_meter, attr_loss_meter, 
+         mm_loss_meter, textual_camo_loss_meter, attr_loss_pred_meter, f_b_alignment_loss_meter, 
+         component_loss_meter, consistency_loss_meter],
         prefix="Training: Epoch=[{}/{}] ".format(epoch, args.epochs))
 
     model.train()
@@ -54,7 +59,9 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
         # forward
         with amp.autocast():
             # pred, fix_out, total_loss, fix_loss, kl_loss, cc_loss, mask_loss, consistency_loss, attr_loss = model(img, img_gt, overall_desc, camo_desc, attr, fix_gt, component_desc)
-            pred, total_loss, mask_loss, consistency_loss, attr_loss = model(img, img_gt, overall_desc, camo_desc, attr, fix_gt, component_desc)
+            pred, total_loss, mask_loss, attr_loss, mm_loss, textual_camo_loss,  \
+            attr_loss_pred, f_b_alignment_loss, component_loss, consistency_loss = \
+            model(img, img_gt, overall_desc, camo_desc, attr, fix_gt, component_desc)
         # backward
         optimizer.zero_grad()
         scaler.scale(total_loss).backward()
@@ -68,31 +75,39 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
         total_loss = total_loss / dist.get_world_size()
         total_loss_meter.update(total_loss.item(), img.size(0))
 
-        # dist.all_reduce(fix_loss.detach())
-        # fix_loss = fix_loss / dist.get_world_size()
-        # fix_loss_meter.update(fix_loss.item(), img.size(0))
-
-        # dist.all_reduce(kl_loss.detach())
-        # kl_loss = kl_loss / dist.get_world_size()
-        # kl_loss_meter.update(kl_loss.item(), img.size(0))
-
-        # dist.all_reduce(cc_loss.detach())
-        # cc_loss = cc_loss / dist.get_world_size()
-        # cc_loss_meter.update(cc_loss.item(), img.size(0))
-
         dist.all_reduce(mask_loss.detach())
         mask_loss = mask_loss / dist.get_world_size()
         mask_loss_meter.update(mask_loss.item(), img.size(0))
-
-        dist.all_reduce(consistency_loss.detach())
-        consistency_loss = consistency_loss / dist.get_world_size()
-        consistency_loss_meter.update(consistency_loss.item(), img.size(0))
 
         dist.all_reduce(attr_loss.detach())
         attr_loss = attr_loss / dist.get_world_size()
         attr_loss_meter.update(attr_loss.item(), img.size(0))   
 
+        dist.all_reduce(mm_loss.detach())
+        mm_loss = mm_loss / dist.get_world_size()
+        mm_loss_meter.update(mm_loss.item(), img.size(0))
 
+        dist.all_reduce(textual_camo_loss.detach())
+        textual_camo_loss = textual_camo_loss / dist.get_world_size()
+        textual_camo_loss_meter.update(textual_camo_loss.item(), img.size(0))
+
+        dist.all_reduce(attr_loss_pred.detach())
+        attr_loss_pred = attr_loss_pred / dist.get_world_size()
+        attr_loss_pred_meter.update(attr_loss_pred.item(), img.size(0))
+
+        dist.all_reduce(f_b_alignment_loss.detach())
+        f_b_alignment_loss = f_b_alignment_loss / dist.get_world_size()
+        f_b_alignment_loss_meter.update(f_b_alignment_loss.item(), img.size(0))
+
+        dist.all_reduce(component_loss.detach())
+        component_loss = component_loss / dist.get_world_size()
+        component_loss_meter.update(component_loss.item(), img.size(0))
+
+        dist.all_reduce(consistency_loss.detach())
+        consistency_loss = consistency_loss / dist.get_world_size()
+        consistency_loss_meter.update(consistency_loss.item(), img.size(0))
+
+        
         lr.update(scheduler.get_last_lr()[-1])
         batch_time.update(time.time() - end)
         end = time.time()
@@ -106,12 +121,15 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
                         "time/data": data_time.val,
                         "training/lr": lr.val,
                         "training/total loss": total_loss_meter.val,
-                        "training/fix loss": fix_loss_meter.val,
-                        "training/kl loss": kl_loss_meter.val,
-                        "training/cc loss": cc_loss_meter.val,
                         "training/mask loss": mask_loss_meter.val,
-                        "training/consistency loss": consistency_loss_meter.val,
                         "training/attr_loss": attr_loss_meter.val,
+                        "training/mm_loss": mm_loss_meter.val,
+                        "training/textual_camo_loss": textual_camo_loss_meter.val,
+                        "training/attr_loss_pred": attr_loss_pred_meter.val,
+                        "training/f_b_alignment_loss": f_b_alignment_loss_meter.val,
+                        "training/component_loss": component_loss_meter.val,
+                        "training/consistency loss": consistency_loss_meter.val,
+                        
                     },
                     step=epoch * len(train_loader) + (i + 1))
 
