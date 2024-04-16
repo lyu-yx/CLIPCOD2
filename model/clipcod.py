@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from model.clip import build_model
 from utils.losses import structure_loss, kl_div_loss, correlation_coefficient_loss, cosine_similarity_loss
-from .layers import (Projector, TransformerDecoder, FixationEstimation, FeatureFusionModule, 
+from .layers import (Projector, TransformerDecoder, FixationEstimation,
                      ProjectionNetwork, AttributePrediction, TextualRefinement, SemanticHierarchicalEmbedding,
                      ForegroundBackgroundAlignment, pool_visual_features, d3_to_d4)
 

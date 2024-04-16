@@ -1,3 +1,7 @@
+pretrain/ViT*
 pretrain/Net*
+*/_*
+wandb/*
 dataset
 tools/fg_bg_test.py
+*.log
